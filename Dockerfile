@@ -1,5 +1,5 @@
 FROM ubuntu:14.04
-MAINTAINER AppliedTrust
+MAINTAINER uovobw
 
 RUN apt-get update && apt-get -y install openjdk-7-jre-headless wget && apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 RUN wget -q -O /usr/src/elasticsearch.deb https://download.elasticsearch.org/elasticsearch/elasticsearch/elasticsearch-1.4.2.deb && dpkg -i /usr/src/elasticsearch.deb
