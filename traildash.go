@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/sqs"
 	"io"
@@ -130,7 +131,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	go c.workLogs()
+    aws_session := session.New(&c.awsConfig)
+
+    go c.workLogs(aws_session)
 	go c.serveKibana()
 
 	log.Print("Started")
@@ -243,10 +246,12 @@ func firewallES(r *http.Request) bool {
 }
 
 // workLogs fetches and loads logs from SQS
-func (c *config) workLogs() {
+func (c *config) workLogs(session *session.Session) {
+    s3Client := s3.New(session)
+    sqsClient := sqs.New(session)
 	for {
 		// fetch a message from SQS
-		m, err := c.dequeue()
+        m, err := c.dequeue(sqsClient)
 		if err != nil {
 			kerblowie("Error dequeing from SQS: %s", err.Error())
 			continue
@@ -260,7 +265,7 @@ func (c *config) workLogs() {
 		}
 
 		// download from S3
-		records, err := c.download(m)
+        records, err := c.download(m, s3Client)
 		if err != nil {
 			kerblowie("Error downloading from S3: %s", err.Error())
 			continue
@@ -278,7 +283,7 @@ func (c *config) workLogs() {
 		if c.sqsPersist {
 			c.debug("NOT DELETING sqs://%s [s3://%s/%s]", m.MessageID, m.S3Bucket, m.S3ObjectKey[0])
 		} else {
-			if err = c.deleteSQS(m); err != nil {
+			if err = c.deleteSQS(m, sqsClient); err != nil {
 				kerblowie("Error deleting from SQS queue: %s", err.Error())
 				continue
 			}
@@ -289,16 +294,15 @@ func (c *config) workLogs() {
 }
 
 // dequeue fetches an item from SQS
-func (c *config) dequeue() (*cloudtrailNotification, error) {
+func (c *config) dequeue(sqsClient *sqs.SQS) (*cloudtrailNotification, error) {
 	numRequested := 1
-	q := sqs.New(&c.awsConfig)
 
 	req := sqs.ReceiveMessageInput{
-		QueueURL:            aws.String(c.queueURL),
+		QueueUrl:            aws.String(c.queueURL),
 		MaxNumberOfMessages: aws.Int64(int64(numRequested)),
 		WaitTimeSeconds:     aws.Int64(20), // max allowed
 	}
-	resp, err := q.ReceiveMessage(&req)
+	resp, err := sqsClient.ReceiveMessage(&req)
 	if err != nil {
 		return nil, fmt.Errorf("SQS ReceiveMessage error: %s", err.Error())
 	}
@@ -320,7 +324,7 @@ func (c *config) dequeue() (*cloudtrailNotification, error) {
 	n.MessageID = not.MessageID
 	n.ReceiptHandle = *m.ReceiptHandle
 	if not.Message == "CloudTrail validation message." { // swallow validation messages
-		if err = c.deleteSQS(&n); err != nil {
+        if err = c.deleteSQS(&n, sqsClient); err != nil {
 			return nil, fmt.Errorf("Error deleting CloudTrail validation message [id: %s]: %s", not.MessageID, err.Error())
 		}
 		return nil, fmt.Errorf("Deleted CloudTrail validation message id %s", not.MessageID)
@@ -331,16 +335,16 @@ func (c *config) dequeue() (*cloudtrailNotification, error) {
 }
 
 // download fetches the CloudTrail logfile from S3 and parses it
-func (c *config) download(m *cloudtrailNotification) (*[]cloudtrailRecord, error) {
+func (c *config) download(m *cloudtrailNotification, s3client *s3.S3) (*[]cloudtrailRecord, error) {
 	if len(m.S3ObjectKey) != 1 {
 		return nil, fmt.Errorf("Expected one S3 key but got %d", len(m.S3ObjectKey[0]))
 	}
-	s := s3.New(&c.awsConfig)
+	//s := s3.New(&c.awsConfig)
 	q := s3.GetObjectInput{
 		Bucket: aws.String(m.S3Bucket),
 		Key:    aws.String(m.S3ObjectKey[0]),
 	}
-	o, err := s.GetObject(&q)
+	o, err := s3client.GetObject(&q)
 	if err != nil {
 		return nil, err
 	}
@@ -387,13 +391,13 @@ func (c *config) load(records *[]cloudtrailRecord) error {
 }
 
 // deleteSQS removes a completed notification from the queue
-func (c *config) deleteSQS(m *cloudtrailNotification) error {
-	q := sqs.New(&c.awsConfig)
+func (c *config) deleteSQS(m *cloudtrailNotification, sqsClient *sqs.SQS) error {
+	//q := sqs.New(&c.awsConfig)
 	req := sqs.DeleteMessageInput{
-		QueueURL:      aws.String(c.queueURL),
+        QueueUrl:      aws.String(c.queueURL),
 		ReceiptHandle: aws.String(m.ReceiptHandle),
 	}
-	_, err := q.DeleteMessage(&req)
+	_, err := sqsClient.DeleteMessage(&req)
 	if err != nil {
 		return err
 	}
